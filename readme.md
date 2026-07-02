@@ -1,0 +1,43 @@
+# Go Solo Mining Proxy
+
+ระบบ Solo Mining Proxy ประสิทธิภาพสูงและน้ำหนักเบา เขียนด้วยภาษา Go ออกแบบมาสำหรับเหรียญอัลกอริทึม SHA256d (Optimized สำหรับ Auroracoin) โดยเฉพาะ เพื่อเชื่อมต่อเครื่องขุด ASIC เข้ากับ Node โดยตรงสำหรับการขุดแบบ Solo
+
+## คุณสมบัติหลัก
+
+* **Stratum Protocol Support:** รองรับการเชื่อมต่อกับเครื่องขุด ASIC ยุคใหม่ได้อย่างสมบูรณ์
+* **AsicBoost (Version-Rolling):** รองรับการทำงาน AsicBoost เต็มรูปแบบเพื่อประสิทธิภาพการประหยัดพลังงานสูงสุด
+* **ZeroMQ (ZMQ) Integration:** เชื่อมต่อรับข้อมูล `hashblock` จาก Node ทันทีเมื่อเกิดบล็อกใหม่ ช่วยลดอัตราการเกิดบล็อกกำพร้า (Orphan Rate)
+* **Discord Webhook Notifications:** ระบบแจ้งเตือนผ่าน Discord ทันทีเมื่อพบบล็อกใหม่ หรือเมื่อระบบเริ่มทำงาน
+* **Web Dashboard:** หน้าเว็บมอนิเตอร์สถานะความยากเครือข่าย เครื่องขุดที่ออนไลน์ จำนวน Share และบล็อกที่เจอแบบ Real-time
+* **Docker Ready:** รองรับการติดตั้งและใช้งานผ่าน `docker-compose` ได้ทันที
+
+## วิธีการติดตั้งและเริ่มต้นใช้งาน
+
+1. คัดลอกไฟล์โปรเจคทั้งหมดไปยังเซิร์ฟเวอร์ของคุณ
+2. ตรวจสอบการดาวน์โหลดไลบรารีที่จำเป็น (หากต้องการรันจาก Source):
+   ```bash
+   go mod init soloproxy
+   go get [github.com/go-zeromq/zmq4](https://github.com/go-zeromq/zmq4)
+   ```
+3. แก้ไขข้อมูลในไฟล์ `docker-compose.yml` ให้ตรงกับการใช้งานของคุณ:
+   * `RPC_URL`, `RPC_USER`, `RPC_PASS`: ข้อมูลสำหรับเชื่อมต่อ RPC ของ Node
+   * `WALLET_ADDRESS`: ที่อยู่กระเป๋าเงิน (Base58) สำหรับรับรางวัล
+   * `DISCORD_WEBHOOK_URL`: (ไม่บังคับ) ลิงก์ Webhook สำหรับรับการแจ้งเตือนใน Discord
+   * `FIXED_DIFF`: ค่าความยากที่ต้องการตั้งให้เครื่องขุด (ค่าเริ่มต้นคือ `10000`)
+4. สั่งบิวด์และเปิดใช้งานระบบผ่าน Docker:
+   ```bash
+   docker-compose up -d --build
+   ```
+
+## การเชื่อมต่อเครื่องขุด
+
+* **ตั้งค่าที่เครื่องขุด (URL):** `stratum+tcp://<proxy-ip>:3333`
+* **Miner Username/Password:** สามารถตั้งค่าเป็นอะไรก็ได้ (เช่น `user:pass`) ระบบ Proxy จะจัดการยืนยันตัวตนให้อัตโนมัติ
+* **หน้าเว็บแดชบอร์ด:** สามารถเข้าดูสถิติได้ที่ `http://<proxy-ip>:8080`
+
+## การตรวจสอบ Log
+
+สามารถดูการส่ง Share และสถานะ AsicBoost ของเครื่องขุดแบบ Real-time ได้ผ่านคำสั่ง:
+```bash
+docker logs -f auroracoin-solo-proxy
+```
