@@ -446,7 +446,7 @@ func (jm *JobManager) handleMiner(conn net.Conn) {
 				jm.BlocksFound++
 				jm.Unlock()
 
-				alertMsg := fmt.Sprintf("🎉 พบบล็อกใหม่แล้ว! (Share Diff: %s)", formatKMGT(diffShare))
+				alertMsg := fmt.Sprintf("🎉 พบบล็อกใหม่แล้ว! | เลขบล็อก: #%d | (Share Diff: %s)", job.Height, formatKMGT(diffShare))
 				log.Println(alertMsg)
 				sendDiscordAlert(jm.config.DiscordWebHook, alertMsg)
 
