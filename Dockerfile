@@ -1,9 +1,10 @@
 # Builder Stage
 FROM golang:1.21-alpine AS builder
 WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
+COPY main.go .
+RUN go mod init soloproxy && \
+    go get github.com/go-zeromq/zmq4 && \
+    go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -o soloproxy main.go
 
 # Run Stage
