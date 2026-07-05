@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// สร้าง HTTP Client แบบ Global เพื่อ Reuse Connection (Keep-Alive) ช่วยลด Latency
 var rpcClient = &http.Client{
 	Timeout: 5 * time.Second,
 	Transport: &http.Transport{
@@ -32,6 +31,19 @@ type RPCResponse struct {
 	ID     int             `json:"id"`
 }
 
+type BlockTemplate struct {
+	Height            uint32 `json:"height"`
+	CoinbaseValue     int64  `json:"coinbasevalue"`
+	PreviousBlockHash string `json:"previousblockhash"`
+	Version           uint32 `json:"version"`
+	Bits              string `json:"bits"`
+	CurTime           uint32 `json:"curtime"`
+	Transactions      []struct {
+		Hash string `json:"hash"`
+		Data string `json:"data"`
+	} `json:"transactions"`
+}
+
 func (jm *JobManager) fetchBlockTemplate() {
 	reqPayload := RPCRequest{
 		JSONRPC: "1.0",
@@ -45,13 +57,21 @@ func (jm *JobManager) fetchBlockTemplate() {
 		ID: 1,
 	}
 
-	body, _ := json.Marshal(reqPayload)
+	body, err := json.Marshal(reqPayload)
+	if err != nil {
+		log.Printf("❌ สร้าง Request ล้มเหลว: %v", err)
+		return
+	}
 
 	var resp *http.Response
-	var err error
 
 	for i := 0; i < 3; i++ {
-		req, _ := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
+		req, err := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
+		if err != nil {
+			log.Printf("❌ เตรียม HTTP Request ล้มเหลว: %v", err)
+			return
+		}
+
 		req.SetBasicAuth(jm.config.RPCUser, jm.config.RPCPass)
 		req.Header.Set("Content-Type", "application/json")
 
@@ -70,6 +90,7 @@ func (jm *JobManager) fetchBlockTemplate() {
 
 	var rpcResp RPCResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		log.Printf("❌ อ่านข้อมูลการตอบกลับล้มเหลว: %v", err)
 		return
 	}
 
@@ -78,60 +99,35 @@ func (jm *JobManager) fetchBlockTemplate() {
 		return
 	}
 
-	var jobData map[string]interface{}
-	if err := json.Unmarshal(rpcResp.Result, &jobData); err != nil || jobData == nil {
-		log.Printf("❌ ข้อมูล Result ว่างเปล่าหรืออ่านไม่ได้")
+	var bt BlockTemplate
+	if err := json.Unmarshal(rpcResp.Result, &bt); err != nil {
+		log.Printf("❌ แปลงข้อมูล Block template ล้มเหลว (Node อาจกำลัง Sync): %v", err)
 		return
 	}
 
-	heightFloat, ok1 := jobData["height"].(float64)
-	cbValueFloat, ok2 := jobData["coinbasevalue"].(float64)
-	prevHash, ok3 := jobData["previousblockhash"].(string)
-	versionFloat, ok4 := jobData["version"].(float64)
-	bitsHex, ok5 := jobData["bits"].(string)
-	curTimeFloat, ok6 := jobData["curtime"].(float64)
-
-	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
-		log.Printf("❌ Block template ข้อมูลไม่ครบถ้วน (Node อาจยังไม่พร้อมหรือกำลัง Sync)")
-		return
+	txHashes := make([]string, 0, len(bt.Transactions))
+	txData := make([]string, 0, len(bt.Transactions))
+	for _, tx := range bt.Transactions {
+		txHashes = append(txHashes, tx.Hash)
+		txData = append(txData, tx.Data)
 	}
+
+	merkleBranches := buildMerkleBranches(txHashes)
+	coinb1, coinb2 := buildCoinbaseParts(bt.Height, bt.CoinbaseValue, jm.config.WalletAddress)
+	curTimeHex := fmt.Sprintf("%08x", bt.CurTime)
 
 	jm.Lock()
 	jm.jobIDCounter++
 	jobIDStr := fmt.Sprintf("%x", jm.jobIDCounter)
 
-	height := uint32(heightFloat)
-	coinbaseValue := int64(cbValueFloat)
-
-	var txHashes []string
-	var txData []string
-	if txs, ok := jobData["transactions"].([]interface{}); ok {
-		txHashes = make([]string, 0, len(txs))
-		txData = make([]string, 0, len(txs))
-		
-		for _, tx := range txs {
-			if txMap, ok := tx.(map[string]interface{}); ok {
-				hash, hashOk := txMap["hash"].(string)
-				data, dataOk := txMap["data"].(string)
-				if hashOk && dataOk {
-					txHashes = append(txHashes, hash)
-					txData = append(txData, data)
-				}
-			}
-		}
-	}
-
-	merkleBranches := buildMerkleBranches(txHashes)
-	coinb1, coinb2 := buildCoinbaseParts(height, coinbaseValue, jm.config.WalletAddress)
-
 	newJob := &StratumJob{
 		JobID:          jobIDStr,
-		PrevHashHex:    prevHash,
-		Version:        uint32(versionFloat),
-		BitsHex:        bitsHex,
-		CurTime:        fmt.Sprintf("%08x", int(curTimeFloat)),
-		Height:         height,
-		CoinbaseValue:  coinbaseValue,
+		PrevHashHex:    bt.PreviousBlockHash,
+		Version:        bt.Version,
+		BitsHex:        bt.Bits,
+		CurTime:        curTimeHex,
+		Height:         bt.Height,
+		CoinbaseValue:  bt.CoinbaseValue,
 		TxHashes:       txHashes,
 		TxData:         txData,
 		MerkleBranches: merkleBranches,
@@ -140,16 +136,16 @@ func (jm *JobManager) fetchBlockTemplate() {
 	}
 
 	for k, v := range jm.jobs {
-		if v.Height < height-1 {
+		if v.Height < bt.Height-1 {
 			delete(jm.jobs, k)
 		}
 	}
 
 	jm.jobs[jobIDStr] = newJob
 	jm.currentJob = newJob
-	jm.NetworkDiff = targetToDiff(bitsToTarget(bitsHex))
+	jm.NetworkDiff = targetToDiff(bitsToTarget(bt.Bits))
 
-	log.Printf("📦 ดึง Block Template สำเร็จ | Height: %d | Tx: %d | Diff: %s | Job: %s", height, len(txHashes), formatKMGT(jm.NetworkDiff), jobIDStr)
+	log.Printf("📦 ดึง Block Template สำเร็จ | Height: %d | Tx: %d | Diff: %s | Job: %s", bt.Height, len(txHashes), formatKMGT(jm.NetworkDiff), jobIDStr)
 	jm.Unlock()
 
 	jm.broadcastNewJob()
@@ -163,9 +159,18 @@ func (jm *JobManager) submitBlockToNode(blockHex string) {
 		ID:      2,
 	}
 
-	body, _ := json.Marshal(reqPayload)
+	body, err := json.Marshal(reqPayload)
+	if err != nil {
+		log.Printf("❌ สร้าง Request สำหรับ Submit ล้มเหลว: %v", err)
+		return
+	}
 
-	req, _ := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
+	if err != nil {
+		log.Printf("❌ เตรียม HTTP Request ล้มเหลว: %v", err)
+		return
+	}
+
 	req.SetBasicAuth(jm.config.RPCUser, jm.config.RPCPass)
 	req.Header.Set("Content-Type", "application/json")
 
