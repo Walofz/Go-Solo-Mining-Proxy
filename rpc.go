@@ -9,6 +9,16 @@ import (
 	"time"
 )
 
+// สร้าง HTTP Client แบบ Global เพื่อ Reuse Connection (Keep-Alive) ช่วยลด Latency
+var rpcClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 type RPCRequest struct {
 	JSONRPC string        `json:"jsonrpc"`
 	Method  string        `json:"method"`
@@ -36,10 +46,6 @@ func (jm *JobManager) fetchBlockTemplate() {
 	}
 
 	body, _ := json.Marshal(reqPayload)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{DisableKeepAlives: true},
-	}
 
 	var resp *http.Response
 	var err error
@@ -48,9 +54,8 @@ func (jm *JobManager) fetchBlockTemplate() {
 		req, _ := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
 		req.SetBasicAuth(jm.config.RPCUser, jm.config.RPCPass)
 		req.Header.Set("Content-Type", "application/json")
-		req.Close = true
 
-		resp, err = client.Do(req)
+		resp, err = rpcClient.Do(req)
 		if err == nil {
 			break
 		}
@@ -79,7 +84,6 @@ func (jm *JobManager) fetchBlockTemplate() {
 		return
 	}
 
-	// ตรวจสอบข้อมูลที่สำคัญว่ามีอยู่จริงและถูกต้อง
 	heightFloat, ok1 := jobData["height"].(float64)
 	cbValueFloat, ok2 := jobData["coinbasevalue"].(float64)
 	prevHash, ok3 := jobData["previousblockhash"].(string)
@@ -102,6 +106,9 @@ func (jm *JobManager) fetchBlockTemplate() {
 	var txHashes []string
 	var txData []string
 	if txs, ok := jobData["transactions"].([]interface{}); ok {
+		txHashes = make([]string, 0, len(txs))
+		txData = make([]string, 0, len(txs))
+		
 		for _, tx := range txs {
 			if txMap, ok := tx.(map[string]interface{}); ok {
 				hash, hashOk := txMap["hash"].(string)
@@ -157,17 +164,12 @@ func (jm *JobManager) submitBlockToNode(blockHex string) {
 	}
 
 	body, _ := json.Marshal(reqPayload)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{DisableKeepAlives: true},
-	}
 
 	req, _ := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
 	req.SetBasicAuth(jm.config.RPCUser, jm.config.RPCPass)
 	req.Header.Set("Content-Type", "application/json")
-	req.Close = true
 
-	resp, err := client.Do(req)
+	resp, err := rpcClient.Do(req)
 	if err != nil {
 		log.Printf("ยิง submitblock ล้มเหลว: %v", err)
 		return
