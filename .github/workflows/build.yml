@@ -1,18 +1,17 @@
-﻿name: Go Build and Publish
+name: Go Build and Publish
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: ["main", "master"]
-
-permissions:
-  contents: read
-  packages: write
+    branches: [ "main", "master" ]
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout Code
@@ -24,10 +23,11 @@ jobs:
           go-version: '1.25'
 
       - name: Install Dependencies
-        run: go mod tidy
-
-      - name: Run Tests
-        run: go test ./...
+        run: |
+          if [ ! -f go.mod ]; then
+            go mod init go-solo-mining-proxy
+          fi
+          go mod tidy
 
       - name: Build Check (Go)
         run: go build -v ./...

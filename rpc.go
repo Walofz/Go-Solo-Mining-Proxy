@@ -6,8 +6,35 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 )
+
+var rpcClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+var getBlockTemplatePayload []byte
+
+func init() {
+	req := RPCRequest{
+		JSONRPC: "1.0",
+		Method:  "getblocktemplate",
+		Params: []interface{}{
+			map[string]interface{}{
+				"rules": []string{"segwit"},
+				"algo":  "sha256d",
+			},
+		},
+		ID: 1,
+	}
+	getBlockTemplatePayload, _ = json.Marshal(req)
+}
 
 type RPCRequest struct {
 	JSONRPC string        `json:"jsonrpc"`
@@ -22,35 +49,34 @@ type RPCResponse struct {
 	ID     int             `json:"id"`
 }
 
+type BlockTemplate struct {
+	Height            uint32 `json:"height"`
+	CoinbaseValue     int64  `json:"coinbasevalue"`
+	PreviousBlockHash string `json:"previousblockhash"`
+	Version           uint32 `json:"version"`
+	Bits              string `json:"bits"`
+	CurTime           uint32 `json:"curtime"`
+	Transactions      []struct {
+		Hash string `json:"hash"`
+		Data string `json:"data"`
+	} `json:"transactions"`
+}
+
 func (jm *JobManager) fetchBlockTemplate() {
-	reqPayload := RPCRequest{
-		JSONRPC: "1.0",
-		Method:  "getblocktemplate",
-		Params: []interface{}{
-			map[string]interface{}{
-				"rules": []string{"segwit"},
-				"algo":  "sha256d",
-			},
-		},
-		ID: 1,
-	}
-
-	body, _ := json.Marshal(reqPayload)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{DisableKeepAlives: true},
-	}
-
 	var resp *http.Response
 	var err error
 
 	for i := 0; i < 3; i++ {
-		req, _ := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
+		req, errReq := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewReader(getBlockTemplatePayload))
+		if errReq != nil {
+			log.Printf("❌ เตรียม HTTP Request ล้มเหลว: %v", errReq)
+			return
+		}
+
 		req.SetBasicAuth(jm.config.RPCUser, jm.config.RPCPass)
 		req.Header.Set("Content-Type", "application/json")
-		req.Close = true
 
-		resp, err = client.Do(req)
+		resp, err = rpcClient.Do(req)
 		if err == nil {
 			break
 		}
@@ -65,40 +91,45 @@ func (jm *JobManager) fetchBlockTemplate() {
 
 	var rpcResp RPCResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		log.Printf("❌ อ่านข้อมูลการตอบกลับล้มเหลว: %v", err)
 		return
 	}
 
-	var jobData map[string]interface{}
-	json.Unmarshal(rpcResp.Result, &jobData)
+	if rpcResp.Error != nil {
+		log.Printf("❌ Node ส่ง Error กลับมา: %v", rpcResp.Error)
+		return
+	}
 
-	jm.Lock()
-	jm.jobIDCounter++
-	jobIDStr := fmt.Sprintf("%x", jm.jobIDCounter)
+	var bt BlockTemplate
+	if err := json.Unmarshal(rpcResp.Result, &bt); err != nil {
+		log.Printf("❌ แปลงข้อมูล Block template ล้มเหลว (Node อาจกำลัง Sync): %v", err)
+		return
+	}
 
-	height := uint32(jobData["height"].(float64))
-	coinbaseValue := int64(jobData["coinbasevalue"].(float64))
-
-	var txHashes []string
-	var txData []string
-	if txs, ok := jobData["transactions"].([]interface{}); ok {
-		for _, tx := range txs {
-			txMap := tx.(map[string]interface{})
-			txHashes = append(txHashes, txMap["hash"].(string))
-			txData = append(txData, txMap["data"].(string))
-		}
+	txCount := len(bt.Transactions)
+	txHashes := make([]string, txCount)
+	txData := make([]string, txCount)
+	for i, tx := range bt.Transactions {
+		txHashes[i] = tx.Hash
+		txData[i] = tx.Data
 	}
 
 	merkleBranches := buildMerkleBranches(txHashes)
-	coinb1, coinb2 := buildCoinbaseParts(height, coinbaseValue, jm.config.WalletAddress)
+	coinb1, coinb2 := buildCoinbaseParts(bt.Height, bt.CoinbaseValue, jm.config.WalletAddress)
+	curTimeHex := fmt.Sprintf("%08x", bt.CurTime)
+
+	jm.Lock()
+	jm.jobIDCounter++
+	jobIDStr := strconv.FormatUint(uint64(jm.jobIDCounter), 16)
 
 	newJob := &StratumJob{
 		JobID:          jobIDStr,
-		PrevHashHex:    jobData["previousblockhash"].(string),
-		Version:        uint32(jobData["version"].(float64)),
-		BitsHex:        jobData["bits"].(string),
-		CurTime:        fmt.Sprintf("%08x", int(jobData["curtime"].(float64))),
-		Height:         height,
-		CoinbaseValue:  coinbaseValue,
+		PrevHashHex:    bt.PreviousBlockHash,
+		Version:        bt.Version,
+		BitsHex:        bt.Bits,
+		CurTime:        curTimeHex,
+		Height:         bt.Height,
+		CoinbaseValue:  bt.CoinbaseValue,
 		TxHashes:       txHashes,
 		TxData:         txData,
 		MerkleBranches: merkleBranches,
@@ -107,44 +138,35 @@ func (jm *JobManager) fetchBlockTemplate() {
 	}
 
 	for k, v := range jm.jobs {
-		if v.Height < height-1 {
+		if v.Height < bt.Height-1 {
 			delete(jm.jobs, k)
 		}
 	}
 
 	jm.jobs[jobIDStr] = newJob
 	jm.currentJob = newJob
+	jm.NetworkDiff = targetToDiff(bitsToTarget(bt.Bits))
 
-	if bitsHex, ok := jobData["bits"].(string); ok {
-		jm.NetworkDiff = targetToDiff(bitsToTarget(bitsHex))
-	}
-
-	log.Printf("📦 ดึง Block Template สำเร็จ | Height: %d | Tx: %d | Diff: %s | Job: %s", height, len(txHashes), formatKMGT(jm.NetworkDiff), jobIDStr)
+	log.Printf("📦 ดึง Block Template สำเร็จ | Height: %d | Tx: %d | Diff: %s | Job: %s", bt.Height, txCount, formatKMGT(jm.NetworkDiff), jobIDStr)
 	jm.Unlock()
 
 	jm.broadcastNewJob()
 }
 
 func (jm *JobManager) submitBlockToNode(blockHex string) {
-	reqPayload := RPCRequest{
-		JSONRPC: "1.0",
-		Method:  "submitblock",
-		Params:  []interface{}{blockHex},
-		ID:      2,
+	payloadStr := `{"jsonrpc":"1.0","method":"submitblock","params":["` + blockHex + `"],"id":2}`
+	body := []byte(payloadStr)
+
+	req, err := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("❌ เตรียม HTTP Request ล้มเหลว: %v", err)
+		return
 	}
 
-	body, _ := json.Marshal(reqPayload)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{DisableKeepAlives: true},
-	}
-
-	req, _ := http.NewRequest("POST", jm.config.RPCUrl, bytes.NewBuffer(body))
 	req.SetBasicAuth(jm.config.RPCUser, jm.config.RPCPass)
 	req.Header.Set("Content-Type", "application/json")
-	req.Close = true
 
-	resp, err := client.Do(req)
+	resp, err := rpcClient.Do(req)
 	if err != nil {
 		log.Printf("ยิง submitblock ล้มเหลว: %v", err)
 		return
@@ -152,6 +174,9 @@ func (jm *JobManager) submitBlockToNode(blockHex string) {
 	defer resp.Body.Close()
 
 	var rpcResp RPCResponse
-	json.NewDecoder(resp.Body).Decode(&rpcResp)
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		log.Printf("อ่านผลลัพธ์ submitblock ล้มเหลว: %v", err)
+		return
+	}
 	log.Printf("ผลลัพธ์จาก Node หลังจาก submitblock: %s", string(rpcResp.Result))
 }
