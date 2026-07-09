@@ -21,6 +21,10 @@ func main() {
 		StartTime:      time.Now(),
 	}
 
+	if err := manager.initDB(); err != nil {
+		log.Fatalf("ไม่สามารถเปิดฐานข้อมูล SQLite ได้: %v", err)
+	}
+
 	sendDiscordAlert(cfg.DiscordWebHook, "🚀 ระบบ Solo Mining Proxy (AsicBoost Enabled) เริ่มทำงานแล้ว")
 
 	go manager.listenZMQ()
@@ -33,7 +37,11 @@ func main() {
 	}
 	defer listener.Close()
 
-	log.Printf("Stratum Server ทำงานบนพอร์ต %s (Fixed Diff: %d)", cfg.StratumPort, cfg.FixedDiff)
+	if cfg.UseVardiff {
+		log.Printf("Stratum Server ทำงานบนพอร์ต %s (Vardiff enabled)", cfg.StratumPort)
+	} else {
+		log.Printf("Stratum Server ทำงานบนพอร์ต %s (Fixed Diff: %d)", cfg.StratumPort, cfg.FixedDiff)
+	}
 	log.Printf("ขุดเข้ากระเป๋า: %s", cfg.WalletAddress)
 
 	for {

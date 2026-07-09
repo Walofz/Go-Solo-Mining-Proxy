@@ -13,12 +13,16 @@ type Config struct {
 	StratumPort    string
 	WebPort        string
 	FixedDiff      int
+	UseVardiff     bool
 	DiscordWebHook string
 	WalletAddress  string
+	DBPath         string
 }
 
 func loadConfig() Config {
-	diff, _ := strconv.Atoi(getEnv("FIXED_DIFF", "10000"))
+	diff, _ := strconv.Atoi(getEnv("FIXED_DIFF", "8096"))
+	useVardiff := getEnv("USE_VARDIFF", "no") == "yes"
+
 	return Config{
 		RPCUrl:         getEnv("RPC_URL", "http://127.0.0.1:13031"),
 		RPCUser:        getEnv("RPC_USER", "user"),
@@ -27,8 +31,10 @@ func loadConfig() Config {
 		StratumPort:    getEnv("STRATUM_PORT", ":3333"),
 		WebPort:        getEnv("WEB_PORT", ":8080"),
 		FixedDiff:      diff,
+		UseVardiff:     useVardiff,
 		DiscordWebHook: getEnv("DISCORD_WEBHOOK_URL", ""),
 		WalletAddress:  getEnv("WALLET_ADDRESS", ""),
+		DBPath:         getEnv("DB_PATH", "./soloproxy.db"),
 	}
 }
 

@@ -1,43 +1,79 @@
 # Go SoloPool
 
-ระบบ Solo Mining Pool ประสิทธิภาพสูงและน้ำหนักเบา เขียนด้วยภาษา Go ออกแบบมาสำหรับเหรียญอัลกอริทึม SHA256d โดยเฉพาะ เพื่อเชื่อมต่อเครื่องขุด ASIC เข้ากับ Node โดยตรงสำหรับการขุดแบบ Solo
+ระบบ Solo Mining Proxy สำหรับขุดแบบ Solo บนเครือข่ายที่รองรับ Stratum และ RPC โดยมีฟีเจอร์พื้นฐานสำหรับตัวขุด ASIC, vardiff, SQLite storage และ JSON stats API
 
 ## คุณสมบัติหลัก
 
-* **Stratum Protocol Support:** รองรับการเชื่อมต่อกับเครื่องขุด ASIC ยุคใหม่ได้อย่างสมบูรณ์
-* **AsicBoost (Version-Rolling):** รองรับการทำงาน AsicBoost เต็มรูปแบบเพื่อประสิทธิภาพการประหยัดพลังงานสูงสุด
-* **ZeroMQ (ZMQ) Integration:** เชื่อมต่อรับข้อมูล `hashblock` จาก Node ทันทีเมื่อเกิดบล็อกใหม่ ช่วยลดอัตราการเกิดบล็อกกำพร้า (Orphan Rate)
-* **Discord Webhook Notifications:** ระบบแจ้งเตือนผ่าน Discord ทันทีเมื่อพบบล็อกใหม่ หรือเมื่อระบบเริ่มทำงาน
-* **Web Dashboard:** หน้าเว็บมอนิเตอร์สถานะความยากเครือข่าย เครื่องขุดที่ออนไลน์ จำนวน Share และบล็อกที่เจอแบบ Real-time
-* **Docker Ready:** รองรับการติดตั้งและใช้งานผ่าน `docker-compose` ได้ทันที
+- Stratum protocol support สำหรับเครื่องขุด ASIC
+- AsicBoost / version-rolling support
+- ZeroMQ (ZMQ) integration เพื่อรับ hashblock จาก node ทันที
+- Discord webhook notification เมื่อเจอบล็อกหรือเริ่มระบบ
+- JSON stats API ที่ให้ข้อมูลสถานะและประวัติบล็อกผ่าน HTTP
+- SQLite storage สำหรับเก็บประวัติบล็อกแบบถาวร
+- Docker ready และใช้กับ docker-compose ได้ทันที
 
-## วิธีการติดตั้งและเริ่มต้นใช้งาน
+## การติดตั้งและรัน
 
-1. คัดลอกไฟล์โปรเจคทั้งหมดไปยังเซิร์ฟเวอร์ของคุณ
-2. ตรวจสอบการดาวน์โหลดไลบรารีที่จำเป็น (หากต้องการรันจาก Source):
-   ```bash
-   go mod init soloproxy
-   go get github.com/go-zeromq/zmq4
-   ```
-3. แก้ไขข้อมูลในไฟล์ `docker-compose.yml` ให้ตรงกับการใช้งานของคุณ:
-   * `RPC_URL`, `RPC_USER`, `RPC_PASS`: ข้อมูลสำหรับเชื่อมต่อ RPC ของ Node
-   * `WALLET_ADDRESS`: ที่อยู่กระเป๋าเงิน (Base58) สำหรับรับรางวัล
-   * `DISCORD_WEBHOOK_URL`: (ไม่บังคับ) ลิงก์ Webhook สำหรับรับการแจ้งเตือนใน Discord
-   * `FIXED_DIFF`: ค่าความยากที่ต้องการตั้งให้เครื่องขุด (ค่าเริ่มต้นคือ `10000`)
-4. สั่งบิวด์และเปิดใช้งานระบบผ่าน Docker:
-   ```bash
-   docker-compose up -d --build
-   ```
+1. คัดลอกโปรเจกต์ไปยังเครื่องของคุณ
+2. แก้ไขค่าตั้งใน docker-compose.yml ให้ตรงกับ node ของคุณ:
+   - RPC_URL / RPC_USER / RPC_PASS
+   - WALLET_ADDRESS
+   - DISCORD_WEBHOOK_URL (ถ้ามี)
+   - USE_VARDIFF=no หรือ yes
+   - FIXED_DIFF=8096
+3. รันด้วย Docker:
+
+```bash
+docker compose up -d --build
+```
+
+## ตัวเลือกสิ่งแวดล้อม
+
+- USE_VARDIFF=no : ใช้ความยากคงที่ที่ 8096
+- USE_VARDIFF=yes : เปิด vardiff แบบอัตโนมัติ
+- DB_PATH=./soloproxy.db : ที่เก็บฐานข้อมูล SQLite
 
 ## การเชื่อมต่อเครื่องขุด
 
-* **ตั้งค่าที่เครื่องขุด (URL):** `stratum+tcp://<pool-ip>:3333`
-* **Miner Username/Password:** สามารถตั้งค่าเป็นอะไรก็ได้ (เช่น `user:pass`) ระบบ Proxy จะจัดการยืนยันตัวตนให้อัตโนมัติ
-* **หน้าเว็บแดชบอร์ด:** สามารถเข้าดูสถิติได้ที่ `http://<pool-ip>:8080`
+- URL: stratum+tcp://<pool-ip>:3333
+- Username / Password: ใส่อะไรก็ได้ ระบบจะยอมรับและจัดการ auth เอง
 
-## การตรวจสอบ Log
+## API
 
-สามารถดูการส่ง Share และสถานะ AsicBoost ของเครื่องขุดแบบ Real-time ได้ผ่านคำสั่ง:
+- GET / : คืนข้อมูลสถิติในรูปแบบ JSON
+- GET /api/stats : คืนข้อมูลสถิติรวมและประวัติบล็อกในรูปแบบ JSON
+- GET /api/miners : คืนสถานะเครื่องขุดแต่ละเครื่องในรูปแบบ JSON
+
+## Docker image
+
+GitHub Actions จะสร้าง Docker image และ push ไปยัง GitHub Container Registry เมื่อมีการ push ไปยังสาขา `main` หรือ `master`.
+
+ตัวอย่าง image tag:
+
+```text
+ghcr.io/<OWNER>/go-solo-mining-proxy:latest
+```
+
+## ตรวจสอบระบบ
+
 ```bash
 docker logs -f solo-proxy
+```
+
+## ทดสอบ
+
+```bash
+go test ./...
+```
+
+## รันจากเครื่อง
+
+```bash
+go run main.go
+```
+
+## สร้าง Docker image
+
+```bash
+docker build -t go-solo-mining-proxy .
 ```

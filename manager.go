@@ -3,11 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
-	_ "embed"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log"
 	"math/big"
 	"net"
@@ -17,19 +16,38 @@ import (
 	"time"
 
 	"github.com/go-zeromq/zmq4"
+	_ "modernc.org/sqlite"
 )
 
-//go:embed index.html
-var indexHTML string
+type MinerStatus struct {
+	ID         string `json:"id"`
+	Online     bool   `json:"online"`
+	LastSeen   string `json:"last_seen"`
+	ShareCount int    `json:"share_count"`
+	AsicBoost  bool   `json:"asic_boost"`
+	Difficulty int    `json:"difficulty"`
+}
 
-type DashboardData struct {
-	Wallet      string
-	NetDiff     string
-	FixedDiff   int
-	MinersCount int
-	Shares      int
-	Blocks      int
-	Uptime      string
+type StatsResponse struct {
+	Wallet      string         `json:"wallet"`
+	NetDiff     string         `json:"network_diff"`
+	FixedDiff   int            `json:"fixed_diff"`
+	MinersCount int            `json:"miners_count"`
+	Shares      int            `json:"shares"`
+	Blocks      int            `json:"blocks"`
+	Uptime      string         `json:"uptime"`
+	UseVardiff  bool           `json:"use_vardiff"`
+	NetworkDiff float64        `json:"network_diff_value"`
+	Miners      []MinerStatus  `json:"miners"`
+	BlocksList  []BlockRecord  `json:"blocks_list"`
+}
+
+type BlockRecord struct {
+	ID        int       `json:"id"`
+	Height    uint32    `json:"height"`
+	FoundAt   time.Time `json:"found_at"`
+	DiffShare float64   `json:"diff_share"`
+	MinerID   string    `json:"miner_id"`
 }
 
 type Miner struct {
@@ -37,6 +55,10 @@ type Miner struct {
 	id         string
 	extraNonce string
 	asicBoost  bool
+	diff       int
+	shareTimes []time.Time
+	lastSeen   time.Time
+	shareCount int
 }
 
 type StratumJob struct {
@@ -67,6 +89,7 @@ type JobManager struct {
 	BlocksFound int
 	StartTime   time.Time
 	NetworkDiff float64
+	db          *sql.DB
 }
 
 func (jm *JobManager) listenZMQ() {
@@ -106,7 +129,7 @@ func (jm *JobManager) templateWorker() {
 func (jm *JobManager) handleMiner(conn net.Conn) {
 	minerID := conn.RemoteAddr().String()
 	extranonce1 := fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
-	miner := &Miner{conn: conn, id: minerID, extraNonce: extranonce1, asicBoost: false}
+	miner := &Miner{conn: conn, id: minerID, extraNonce: extranonce1, asicBoost: false, diff: jm.config.FixedDiff, lastSeen: time.Now()}
 
 	jm.Lock()
 	jm.clients[minerID] = miner
@@ -137,7 +160,7 @@ func (jm *JobManager) handleMiner(conn net.Conn) {
 		switch method {
 		case "mining.configure":
 			miner.asicBoost = true
-			resp := fmt.Sprintf(`{"id":%s,"result":{"version-rolling":true,"version-rolling.mask":"1fffe000"},"error":null}`+"\n", idStr)
+			resp := fmt.Sprintf(`{"id":%s,"result":{"version-rolling":true,"version-rolling.mask":"1fffe000","version-rolling.max-diff":true},"error":null}`+"\n", idStr)
 			conn.Write([]byte(resp))
 
 		case "mining.extranonce.subscribe":
@@ -152,7 +175,11 @@ func (jm *JobManager) handleMiner(conn net.Conn) {
 			authResp := fmt.Sprintf(`{"id":%s,"result":true,"error":null}`+"\n", idStr)
 			conn.Write([]byte(authResp))
 
-			diffResp := fmt.Sprintf(`{"id":null,"method":"mining.set_difficulty","params":[%d]}`+"\n", jm.config.FixedDiff)
+			diffValue := jm.config.FixedDiff
+			if jm.config.UseVardiff {
+				diffValue = miner.diff
+			}
+			diffResp := fmt.Sprintf(`{"id":null,"method":"mining.set_difficulty","params":[%d]}`+"\n", diffValue)
 			conn.Write([]byte(diffResp))
 
 			jm.sendJobToMiner(miner)
@@ -180,17 +207,18 @@ func (jm *JobManager) handleMiner(conn net.Conn) {
 
 			jm.Lock()
 			jm.TotalShares++
+			miner.shareCount++
+			miner.lastSeen = time.Now()
 			jm.Unlock()
 
+			if jm.config.UseVardiff {
+				jm.updateMinerVardiff(miner)
+			}
+
 			version := job.Version
-			if len(params) > 5 {
-				if versionBitsStr, ok := params[5].(string); ok && versionBitsStr != "" {
-					vBits, err := strconv.ParseUint(versionBitsStr, 16, 32)
-					if err == nil {
-						mask := uint32(0x1fffe000)
-						version = (version & ^mask) | (uint32(vBits) & mask)
-					}
-				}
+			if versionBits, ok := parseVersionBits(params); ok {
+				mask := uint32(0x1fffe000)
+				version = (version & ^mask) | (uint32(versionBits) & mask)
 			}
 
 			coinbaseTxHex := job.Coinb1 + extranonce1 + extranonce2 + job.Coinb2
@@ -223,6 +251,7 @@ func (jm *JobManager) handleMiner(conn net.Conn) {
 				alertMsg := fmt.Sprintf("🎉 พบบล็อกใหม่แล้ว! | เลขบล็อก: #%d | (Share Diff: %s)", job.Height, formatKMGT(diffShare))
 				log.Println(alertMsg)
 				sendBlockFoundAlert(jm.config.DiscordWebHook, job.Height, diffShare, minerID, jm.config.WalletAddress)
+				_ = jm.saveBlockRecord(job.Height, diffShare, minerID)
 
 				txCount := encodeVarInt(uint64(len(job.TxHashes) + 1))
 				blockHex := hex.EncodeToString(headerBytes) + txCount + coinbaseTxHex
@@ -240,6 +269,78 @@ func (jm *JobManager) handleMiner(conn net.Conn) {
 			resp := fmt.Sprintf(`{"id":%s,"result":true,"error":null}`+"\n", idStr)
 			conn.Write([]byte(resp))
 		}
+	}
+}
+
+func parseVersionBits(params []interface{}) (uint32, bool) {
+	if len(params) <= 5 {
+		return 0, false
+	}
+
+	switch v := params[5].(type) {
+	case string:
+		if v == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseUint(v, 16, 32)
+		if err != nil {
+			return 0, false
+		}
+		return uint32(parsed), true
+	case float64:
+		return uint32(v), true
+	case int:
+		return uint32(v), true
+	case int64:
+		return uint32(v), true
+	case uint32:
+		return v, true
+	case uint64:
+		return uint32(v), true
+	default:
+		return 0, false
+	}
+}
+
+func calculateVardiff(currentDiff, shareRate, targetRate, minDiff, maxDiff int) int {
+	if shareRate <= 0 {
+		return currentDiff
+	}
+
+	newDiff := currentDiff * shareRate / targetRate
+	if newDiff < minDiff {
+		newDiff = minDiff
+	}
+	if newDiff > maxDiff {
+		newDiff = maxDiff
+	}
+	return newDiff
+}
+
+func (jm *JobManager) updateMinerVardiff(miner *Miner) {
+	miner.shareTimes = append(miner.shareTimes, time.Now())
+	window := 30
+	if len(miner.shareTimes) > window {
+		miner.shareTimes = miner.shareTimes[len(miner.shareTimes)-window:]
+	}
+	if len(miner.shareTimes) < 2 {
+		return
+	}
+
+	oldest := miner.shareTimes[0]
+	latest := miner.shareTimes[len(miner.shareTimes)-1]
+	if latest.Sub(oldest) <= 0 {
+		return
+	}
+
+	shareRate := float64(len(miner.shareTimes)) / latest.Sub(oldest).Seconds()
+	targetRate := 4.0
+	newDiff := calculateVardiff(miner.diff, int(shareRate), int(targetRate), 64, 10000)
+	miner.diff = newDiff
+
+	if miner.diff != jm.config.FixedDiff {
+		resp := fmt.Sprintf(`{"id":null,"method":"mining.set_difficulty","params":[%d]}`+"\n", miner.diff)
+		_, _ = miner.conn.Write([]byte(resp))
 	}
 }
 
@@ -275,25 +376,128 @@ func (jm *JobManager) broadcastNewJob() {
 	}
 }
 
-func (jm *JobManager) startWebServer() {
-	tmpl := template.Must(template.New("index").Parse(indexHTML))
+func (jm *JobManager) initDB() error {
+	db, err := sql.Open("sqlite", jm.config.DBPath)
+	if err != nil {
+		return err
+	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		jm.RLock()
-		data := DashboardData{
-			Wallet:      jm.config.WalletAddress,
-			NetDiff:     formatKMGT(jm.NetworkDiff),
-			FixedDiff:   jm.config.FixedDiff,
-			MinersCount: len(jm.clients),
-			Shares:      jm.TotalShares,
-			Blocks:      jm.BlocksFound,
-			Uptime:      time.Since(jm.StartTime).Round(time.Second).String(),
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS blocks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			height INTEGER NOT NULL,
+			found_at DATETIME NOT NULL,
+			diff_share REAL NOT NULL,
+			miner_id TEXT NOT NULL
+		)
+	`); err != nil {
+		db.Close()
+		return err
+	}
+
+	jm.db = db
+	return nil
+}
+
+func (jm *JobManager) saveBlockRecord(height uint32, diffShare float64, minerID string) error {
+	if jm.db == nil {
+		return nil
+	}
+
+	_, err := jm.db.Exec(`
+		INSERT INTO blocks (height, found_at, diff_share, miner_id) VALUES (?, ?, ?, ?)
+	`, height, time.Now().UTC().Format(time.RFC3339), diffShare, minerID)
+	return err
+}
+
+func (jm *JobManager) loadBlockRecords() []BlockRecord {
+	if jm.db == nil {
+		return nil
+	}
+
+	rows, err := jm.db.Query(`
+		SELECT id, height, found_at, diff_share, miner_id FROM blocks ORDER BY found_at DESC LIMIT 50
+	`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var records []BlockRecord
+	for rows.Next() {
+		var rec BlockRecord
+		var foundAt string
+		if err := rows.Scan(&rec.ID, &rec.Height, &foundAt, &rec.DiffShare, &rec.MinerID); err != nil {
+			continue
 		}
-		jm.RUnlock()
+		if ts, err := time.Parse(time.RFC3339, foundAt); err == nil {
+			rec.FoundAt = ts
+		}
+		records = append(records, rec)
+	}
+	return records
+}
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, data); err != nil {
-			log.Printf("Template error: %v", err)
+func (jm *JobManager) minerStatuses() []MinerStatus {
+	statuses := make([]MinerStatus, 0, len(jm.clients))
+	for _, miner := range jm.clients {
+		status := MinerStatus{
+			ID:         miner.id,
+			Online:     true,
+			LastSeen:   miner.lastSeen.UTC().Format(time.RFC3339),
+			ShareCount: miner.shareCount,
+			AsicBoost:  miner.asicBoost,
+			Difficulty: miner.diff,
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
+func (jm *JobManager) buildStatsResponse() StatsResponse {
+	jm.RLock()
+	defer jm.RUnlock()
+
+	blocksList := jm.loadBlockRecords()
+	return StatsResponse{
+		Wallet:      jm.config.WalletAddress,
+		NetDiff:     formatKMGT(jm.NetworkDiff),
+		FixedDiff:   jm.config.FixedDiff,
+		MinersCount: len(jm.clients),
+		Shares:      jm.TotalShares,
+		Blocks:      jm.BlocksFound,
+		Uptime:      time.Since(jm.StartTime).Round(time.Second).String(),
+		UseVardiff:  jm.config.UseVardiff,
+		NetworkDiff: jm.NetworkDiff,
+		Miners:      jm.minerStatuses(),
+		BlocksList:  blocksList,
+	}
+}
+
+func (jm *JobManager) startWebServer() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		stats := jm.buildStatsResponse()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stats); err != nil {
+			log.Printf("Encode stats error: %v", err)
+		}
+	})
+
+	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		stats := jm.buildStatsResponse()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stats); err != nil {
+			log.Printf("Encode stats error: %v", err)
+		}
+	})
+
+	http.HandleFunc("/api/miners", func(w http.ResponseWriter, r *http.Request) {
+		jm.RLock()
+		miners := jm.minerStatuses()
+		jm.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(miners); err != nil {
+			log.Printf("Encode miners error: %v", err)
 		}
 	})
 
