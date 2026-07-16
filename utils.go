@@ -27,6 +27,28 @@ func sendDiscordAlert(webhookURL, message string) {
 	}
 }
 
+func sendBlockFoundAlert(webhookURL string, height uint32, diffShare float64, minerID string, wallet string) {
+	if webhookURL == "" {
+		return
+	}
+	embed := map[string]interface{}{
+		"title":       "🎉 พบบล็อกใหม่แล้ว! (Solo Mining)",
+		"description": fmt.Sprintf("บล็อก #%d ที่ความยาก %s", height, formatKMGT(diffShare)),
+		"color":       16766720,
+		"fields": []map[string]interface{}{
+			{"name": "เครื่องขุด", "value": minerID, "inline": true},
+			{"name": "Wallet", "value": wallet, "inline": false},
+		},
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+	payload := map[string]interface{}{"embeds": []interface{}{embed}}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(body))
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
 func sendNtfyAlert(ntfyURL, subject, message string) {
 	if ntfyURL == "" {
 		return
@@ -75,9 +97,7 @@ func sendNotification(cfg Config, message string) {
 }
 
 func sendBlockFoundNotification(cfg Config, height uint32, diffShare float64, minerID string, wallet string) {
-	discordTitle := "🎉 พบบล็อกใหม่แล้ว! (Solo Mining)"
 	ntfyTitle := "บล็อกใหม่"
-	discordMsg := fmt.Sprintf("🎉 พบบล็อกใหม่แล้ว! Height: #%d | Share Diff: %s | Miner: %s | Wallet: %s", height, formatKMGT(diffShare), minerID, wallet)
 	ntfyMsg := fmt.Sprintf("บล็อก #%d ที่ความยาก %s ด้วยเครื่อง %s", height, formatKMGT(diffShare), minerID)
 
 	switch strings.ToLower(cfg.NotifyProvider) {
